@@ -63,6 +63,9 @@ DEV100_CACHE_DIRS = {
     ),
 }
 
+# SAN score-map cache (ABC): cache/B1_SAN/FSC147_val_dev_100/{stem}.pt
+SAN_DEV100_CACHE_DIR = PROJECT_ROOT / "cache" / "B1_SAN" / "FSC147_val_dev_100"
+
 
 # ============================================================
 # File naming (identical to the frozen caches)
@@ -90,6 +93,10 @@ def m1_split_filename(dataset_index, image_id):
         f"{int(dataset_index):05d}_{image_stem(image_id)}"
         f"_raw_depth_split_labels.npz"
     )
+
+
+def san_scores_filename(image_id):
+    return f"{image_stem(image_id)}.pt"
 
 
 def cache_paths(dataset_index, image_id, cache_dirs=None):
@@ -208,3 +215,95 @@ def load_m1_split_labels(path):
                 data["num_candidate_components"]
             ),
         }
+
+
+def load_san_scores(path):
+    """Load a frozen ABC SAN cache (.pt) -> dict with float32 numpy maps."""
+    import torch
+
+    obj = torch.load(path, map_location="cpu", weights_only=False)
+    return {
+        "image_id": obj["image_id"],
+        "target_category": obj["target_category"],
+        "vocabulary": list(obj["vocabulary"]),
+        "height": int(obj["height"]),
+        "width": int(obj["width"]),
+        "target_score": obj["target_score"].numpy().astype(np.float32),
+        "background_score": obj["background_score"].numpy().astype(np.float32),
+    }
+
+
+# ============================================================
+# Writers (same formats as the frozen caches)
+# ============================================================
+
+def save_b0_masks(path, masks, meta):
+    """Write B0 masks in the B2 cache format."""
+    masks = np.asarray(masks, dtype=bool)
+    n, h, w = masks.shape
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(
+        path,
+        packed_masks=pack_masks(masks, "little"),
+        image_height=np.int32(h),
+        image_width=np.int32(w),
+        num_masks=np.int32(n),
+        bitorder=np.array("little"),
+        areas=np.asarray(meta["areas"], dtype=np.int64),
+        predicted_iou=np.asarray(meta["predicted_iou"], dtype=np.float32),
+        stability_score=np.asarray(meta["stability_score"], dtype=np.float32),
+        bbox_xywh=np.asarray(meta["bbox_xywh"], dtype=np.float32).reshape(n, 4),
+        crop_box_xywh=np.asarray(
+            meta["crop_box_xywh"], dtype=np.float32
+        ).reshape(n, 4),
+        point_xy=np.asarray(meta["point_xy"], dtype=np.float32).reshape(n, 2),
+    )
+
+
+def save_a3c_mask(path, mask, threshold, percentile, dataset_index,
+                  image_id, category):
+    """Write an A3c mask in the ABC artefact format."""
+    mask = np.asarray(mask, dtype=bool)
+    h, w = mask.shape
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(
+        path,
+        mask=mask.astype(np.uint8),
+        dataset_index=np.int32(dataset_index),
+        image_id=np.array(str(image_id)),
+        category=np.array(str(category)),
+        threshold=np.float32(threshold),
+        percentile=np.float32(percentile),
+        height=np.int32(h),
+        width=np.int32(w),
+    )
+
+
+def save_depth(path, depth):
+    """Write depth in the M1 cache format."""
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(path, depth=np.asarray(depth, dtype=np.float32))
+
+
+def save_san_scores(path, image_id, class_name, target_score,
+                    background_score):
+    """Write SAN score maps in the ABC cache format (.pt)."""
+    import torch
+
+    target_score = np.asarray(target_score, dtype=np.float32)
+    h, w = target_score.shape
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    torch.save(
+        {
+            "image_id": str(image_id),
+            "target_category": str(class_name),
+            "vocabulary": [str(class_name), "background"],
+            "height": int(h),
+            "width": int(w),
+            "target_score": torch.from_numpy(target_score),
+            "background_score": torch.from_numpy(
+                np.asarray(background_score, dtype=np.float32)
+            ),
+        },
+        path,
+    )
