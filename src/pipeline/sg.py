@@ -65,12 +65,23 @@ class SGConfig:
         assert self.variant in VALID_VARIANTS, self.variant
 
     @classmethod
-    def from_frozen_json(cls, path, variant="v1"):
-        """Build from the (erratum-corrected) SG_v1_frozen_config.json."""
+    def from_frozen_json(cls, path, variant=None):
+        """
+        Build from a frozen SG config:
+            SG_v1_frozen_config.json   (erratum-corrected)  -> variant "v1"
+            SG_v1.1_frozen_config.json                      -> variant "v1.1"
+
+        If variant is None it is taken from the config's architecture_id.
+        Passing variant explicitly (e.g. "v1.1" with the SG_v1 config) is
+        allowed because the two configs share every parameter.
+        """
         with open(path, "r") as f:
             cfg = json.load(f)
 
-        assert cfg["architecture_id"] == "SG_v1"
+        arch = cfg["architecture_id"]
+        assert arch in ("SG_v1", "SG_v1.1"), f"Unsupported architecture: {arch}"
+        if variant is None:
+            variant = "v1.1" if arch == "SG_v1.1" else "v1"
         g = cfg["geometry"]
 
         assert g["variant"] == "G2"

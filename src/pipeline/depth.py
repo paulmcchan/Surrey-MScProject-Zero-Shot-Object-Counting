@@ -31,7 +31,10 @@ def build_marigold(device="cuda", model_id=MARIGOLD_MODEL_ID):
     from diffusers import MarigoldDepthPipeline
 
     pipe = MarigoldDepthPipeline.from_pretrained(model_id, dtype=torch.float16)
-    return pipe.to(device)
+    pipe = pipe.to(device)
+    # Per-image progress bars add clutter only; results are unaffected.
+    pipe.set_progress_bar_config(disable=True)
+    return pipe
 
 
 def run_marigold(pipe, image, device="cuda", seed=MARIGOLD_SEED,
