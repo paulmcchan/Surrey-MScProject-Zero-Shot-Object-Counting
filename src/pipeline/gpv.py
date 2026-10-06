@@ -247,3 +247,158 @@ def area_ratio_multiplicity(masks, factor=4.0):
     if med > 0:
         mult[group] = np.maximum(1, np.rint(areas[group] / med)).astype(np.int64)
     return mult, group, med
+
+
+# ============================================================
+# Rung 3 — multimask selection
+# ============================================================
+
+def select_multimask(masks3, scores3, point_xy, score_threshold=0.8):
+    """
+    Choose one of SAM2's multimask outputs for a single positive point.
+
+    Rule (pre-declared): among masks with predicted IoU >= score_threshold
+    (SAM2 AMG's default pred_iou_thresh) that contain the prompt point,
+    take the SMALLEST; if none qualifies, take the highest-scoring mask.
+
+    Returns (mask (H, W) bool, score float, rule_used str).
+    """
+    masks3 = np.asarray(masks3, dtype=bool)
+    scores3 = np.asarray(scores3, dtype=np.float64)
+    h, w = masks3.shape[1:]
+    px = int(np.clip(np.rint(point_xy[0]), 0, w - 1))
+    py = int(np.clip(np.rint(point_xy[1]), 0, h - 1))
+    areas = masks3.reshape(masks3.shape[0], -1).sum(axis=1)
+    ok = (scores3 >= score_threshold) & masks3[:, py, px] & (areas > 0)
+    if ok.any():
+        cand = np.flatnonzero(ok)
+        j = cand[np.argmin(areas[cand])]
+        return masks3[j], float(scores3[j]), "smallest_confident"
+    j = int(np.argmax(scores3))
+    return masks3[j], float(scores3[j]), "fallback_top_score"
+
+
+# ============================================================
+# Rung 6b — seeds inside group masks, re-prompting, resolution
+# ============================================================
+
+def object_radius(kept_masks):
+    """Typical object radius from the median kept-mask area: sqrt(A/pi), >= 2."""
+    kept_masks = np.asarray(kept_masks, dtype=bool)
+    if kept_masks.shape[0] == 0:
+        return 2
+    med = float(np.median(kept_masks.reshape(kept_masks.shape[0], -1).sum(axis=1)))
+    return int(max(2, round(np.sqrt(med / np.pi))))
+
+
+def snap_points_to_mask(points_xy, mask):
+    """Move points lying outside `mask` to the nearest mask pixel."""
+    from scipy import ndimage
+
+    pts = np.asarray(points_xy, dtype=np.float64).reshape(-1, 2)
+    if pts.shape[0] == 0 or not mask.any():
+        return np.zeros((0, 2))
+    h, w = mask.shape
+    _, (iy, ix) = ndimage.distance_transform_edt(~mask, return_indices=True)
+    out = []
+    for x, y in pts:
+        cx = int(np.clip(np.rint(x), 0, w - 1))
+        cy = int(np.clip(np.rint(y), 0, h - 1))
+        if mask[cy, cx]:
+            out.append((float(cx), float(cy)))
+        else:
+            out.append((float(ix[cy, cx]), float(iy[cy, cx])))
+    return np.asarray(out, dtype=np.float64)
+
+
+def _peaks(score_map, region, radius, cap):
+    from skimage.feature import peak_local_max
+
+    if not region.any():
+        return np.zeros((0, 2))
+    work = np.where(region, score_map, score_map[region].min() - 1.0)
+    coords = peak_local_max(
+        work, min_distance=radius, labels=region.astype(np.int32),
+        exclude_border=False, num_peaks=cap,
+    )
+    if coords.size == 0:  # flat region: use its centroid
+        ys, xs = np.nonzero(region)
+        return snap_points_to_mask([[xs.mean(), ys.mean()]], region)
+    return coords[:, ::-1].astype(np.float64)  # (row, col) -> (x, y)
+
+
+def seeds_distance_transform(region, radius, cap=200):
+    """Non-depth control: peaks of the region's Euclidean distance transform."""
+    from scipy import ndimage
+    return _peaks(ndimage.distance_transform_edt(region), region, radius, cap)
+
+
+def seeds_semantic(region, target_score, radius, cap=200):
+    """Semantic-only control: SAN target-score peaks inside the region."""
+    return _peaks(np.asarray(target_score, dtype=np.float64), region, radius, cap)
+
+
+def seeds_depth(region, depth, sg_cfg, cap=200):
+    """
+    Geometric prior: SG's G2 depth split of the region (k-means k=2 on
+    depth + 4-connected fragments + G2 retention); seeds = retained
+    fragment centroids, snapped into the region.
+    """
+    from scipy import ndimage
+    from .sg import g2_split_component
+
+    if not region.any():
+        return np.zeros((0, 2))
+    sl = ndimage.find_objects(region.astype(np.int32))[0]
+    res = g2_split_component(region[sl], np.asarray(depth)[sl],
+                             (sl[0].start, sl[1].start), sg_cfg)
+    pts = res["retained_centroids"][:cap]
+    return snap_points_to_mask(pts, region)
+
+
+def resolve_groups(base_masks, base_scores, candidate_idx, new_masks, new_scores,
+                   new_group, iou_threshold=0.5):
+    """
+    Replace candidate group masks by their re-prompted sub-masks.
+
+    Pool = non-candidate base masks + all new masks; IoU-NMS by score.
+    A candidate group mask is REPLACED by its surviving new masks if at
+    least 2 survive; otherwise the group mask itself counts once (and its
+    single survivor, if any, is discarded to avoid double counting).
+
+    Returns dict(count, replaced_groups, kept_groups, added_units).
+    """
+    base_masks = np.asarray(base_masks, dtype=bool)
+    cand = set(int(i) for i in candidate_idx)
+    non_cand = [i for i in range(base_masks.shape[0]) if i not in cand]
+
+    stacks = [base_masks[non_cand]] if non_cand else []
+    scores = [np.asarray(base_scores, dtype=np.float64)[non_cand]] if non_cand else []
+    tags = [np.full(len(non_cand), -1)] if non_cand else []
+    if len(new_masks):
+        stacks.append(np.asarray(new_masks, dtype=bool))
+        scores.append(np.asarray(new_scores, dtype=np.float64))
+        tags.append(np.asarray(new_group, dtype=np.int64))
+    if not stacks:
+        return {"count": len(cand), "replaced_groups": 0,
+                "kept_groups": len(cand), "added_units": 0}
+
+    pool = np.concatenate(stacks)
+    pool_scores = np.concatenate(scores)
+    pool_tags = np.concatenate(tags)
+    keep = nms_masks(pool, pool_scores, iou_threshold)
+    kept_tags = pool_tags[keep]
+
+    count = int((kept_tags == -1).sum())
+    replaced = kept = added = 0
+    for gidx in cand:
+        survivors = int((kept_tags == gidx).sum())
+        if survivors >= 2:
+            count += survivors
+            replaced += 1
+            added += survivors - 1
+        else:
+            count += 1
+            kept += 1
+    return {"count": count, "replaced_groups": replaced,
+            "kept_groups": kept, "added_units": added}
