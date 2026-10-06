@@ -156,3 +156,94 @@ def group_mask_flags(masks, factor=4.0):
     areas = masks.reshape(masks.shape[0], -1).sum(axis=1)
     med = np.median(areas)
     return areas > factor * med
+
+
+# ============================================================
+# Rung 4 — proposal pool (guided masks + B0 AMG masks)
+# ============================================================
+
+def pool_masks(mask_sets, score_sets, source_names):
+    """
+    Concatenate several (N_i, H, W) mask stacks into one proposal pool.
+
+    Returns masks (N, H, W), scores (N,), source (N,) array of names.
+    """
+    stacks, scores, sources = [], [], []
+    shape = None
+    for m, s, name in zip(mask_sets, score_sets, source_names):
+        m = np.asarray(m, dtype=bool)
+        if m.shape[0] == 0:
+            continue
+        shape = m.shape[1:] if shape is None else shape
+        assert m.shape[1:] == shape, "mask shapes differ within one image"
+        stacks.append(m)
+        scores.append(np.asarray(s, dtype=np.float64))
+        sources.append(np.full(m.shape[0], name, dtype=object))
+    if not stacks:
+        return (np.zeros((0, 1, 1), dtype=bool), np.zeros(0),
+                np.zeros(0, dtype=object))
+    return np.concatenate(stacks), np.concatenate(scores), np.concatenate(sources)
+
+
+# ============================================================
+# Rung 5 — semantic verification (SAN target vs background)
+# ============================================================
+
+def mask_semantic_evidence(masks, target_score, background_score):
+    """
+    Per-mask SAN evidence.
+
+    Returns dict of (N,) arrays:
+        mean_target, mean_background : mean scores inside the mask
+        target_pixel_fraction        : share of mask pixels where
+                                       target > background
+    """
+    masks = np.asarray(masks, dtype=bool)
+    n = masks.shape[0]
+    if n == 0:
+        z = np.zeros(0)
+        return {"mean_target": z, "mean_background": z, "target_pixel_fraction": z}
+    flat = masks.reshape(n, -1).astype(np.float32)
+    area = np.maximum(flat.sum(axis=1), 1.0)
+    t = np.asarray(target_score, dtype=np.float32).ravel()
+    b = np.asarray(background_score, dtype=np.float32).ravel()
+    win = (t > b).astype(np.float32)
+    return {
+        "mean_target": (flat @ t) / area,
+        "mean_background": (flat @ b) / area,
+        "target_pixel_fraction": (flat @ win) / area,
+    }
+
+
+def verify_v1(evidence):
+    """V1: mask-level SAN decision — mean target > mean background."""
+    return evidence["mean_target"] > evidence["mean_background"]
+
+
+def verify_v2(evidence):
+    """V2: pixel majority — at least half the mask pixels prefer target."""
+    return evidence["target_pixel_fraction"] >= 0.5
+
+
+# ============================================================
+# Rung 6a — group-mask multiplicity by area ratio (no depth)
+# ============================================================
+
+def area_ratio_multiplicity(masks, factor=4.0):
+    """
+    Masks with area > factor x median area (of this set) are group masks;
+    each contributes max(1, round(area / median_area)). Others contribute 1.
+
+    Returns multiplicity (N,) int, group flags (N,) bool, median area.
+    """
+    masks = np.asarray(masks, dtype=bool)
+    n = masks.shape[0]
+    if n == 0:
+        return np.zeros(0, dtype=np.int64), np.zeros(0, dtype=bool), 0.0
+    areas = masks.reshape(n, -1).sum(axis=1).astype(np.float64)
+    med = float(np.median(areas))
+    group = areas > factor * med
+    mult = np.ones(n, dtype=np.int64)
+    if med > 0:
+        mult[group] = np.maximum(1, np.rint(areas[group] / med)).astype(np.int64)
+    return mult, group, med
