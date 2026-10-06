@@ -244,6 +244,52 @@ OMNICOUNT_DOMAINS = [
     "Wild",
 ]
 
+# ------------------------------------------------------------
+# Roboflow-export placeholder classes (category id 0 used as a
+# supercategory label). They are excluded from each domain's
+# query vocabulary. B3R Section 5 audits whether any of them
+# actually carries annotations.
+# ------------------------------------------------------------
+OMNICOUNT_PLACEHOLDER_CLASSES = {
+    "autonomousvehicle",   # Urban
+    "lands",               # Satellite
+    "Fruits",              # Vegetables
+}
+
+# ------------------------------------------------------------
+# Text-prompt names (used ONLY to prompt the VLM).
+# GT class keys are never changed; evaluation always uses the
+# original annotation names. Any class not listed here is
+# prompted as: lower-case, underscores -> spaces.
+# ------------------------------------------------------------
+OMNICOUNT_PROMPT_NAMES = {
+    # typos / joined words
+    "oren": "orange",
+    "raddish": "radish",
+    "Cerealbox": "cereal box",
+    "trafficlight": "traffic light",
+    "trafficlight_green": "green traffic light",
+    "trafficlight_red": "red traffic light",
+    "trafficlight_yellow": "yellow traffic light",
+    # product / jargon names
+    "planet-oat-original": "oat milk carton",
+    "Galia": "galia melon",
+    # word order
+    "Orange green": "green orange",
+    "Orange ripe": "ripe orange",
+    # Urban: disambiguate bicycle vs motorbike riders
+    "bike": "bicycle",
+    "biker": "cyclist",
+    "motorbiker": "motorcyclist",
+}
+
+
+def omnicount_prompt_name(class_name):
+    """Annotation class name -> text prompt for the VLM."""
+    if class_name in OMNICOUNT_PROMPT_NAMES:
+        return OMNICOUNT_PROMPT_NAMES[class_name]
+    return class_name.replace("_", " ").lower()
+
 class OmniCount191Dataset(Dataset):
     """
     OmniCount-191 loader using the common dataset schema.
@@ -334,6 +380,10 @@ class OmniCount191Dataset(Dataset):
 
         self.index = []
 
+        # Per-domain query vocabulary for this split:
+        # all listed category names except placeholders.
+        self.domain_vocabulary = {}
+
         for domain in self.domains:
 
             split_dir = (
@@ -367,6 +417,11 @@ class OmniCount191Dataset(Dataset):
                 cat["id"]: cat["name"]
                 for cat in coco["categories"]
             }
+
+            self.domain_vocabulary[domain] = sorted(
+                set(categories_by_id.values())
+                - OMNICOUNT_PLACEHOLDER_CLASSES
+            )
 
             # -----------------------------------------------
             # Group object annotations by local image_id
@@ -483,8 +538,16 @@ class OmniCount191Dataset(Dataset):
 
         for class_name, boxes in boxes_by_class.items():
 
+            # OmniCount GT is boxes only. Box centres provide the
+            # point representation required by point-based
+            # diagnostics (e.g. GT-in-mask tests).
+            points = [
+                [(b[0] + b[2]) / 2.0, (b[1] + b[3]) / 2.0]
+                for b in boxes
+            ]
+
             categories[class_name] = {
-                "points": [],
+                "points": points,
                 "boxes": boxes,
                 "count": len(boxes),
             }
@@ -528,6 +591,16 @@ class OmniCount191Dataset(Dataset):
             "dataset": "omnicount191",
 
             "domain": domain,
+
+            # Classes to query for this image (its domain's
+            # vocabulary) and their text prompts.
+            "domain_vocabulary": list(
+                self.domain_vocabulary[domain]
+            ),
+            "prompt_names": {
+                c: omnicount_prompt_name(c)
+                for c in self.domain_vocabulary[domain]
+            },
 
             # Common external split naming:
             # train / val / test
