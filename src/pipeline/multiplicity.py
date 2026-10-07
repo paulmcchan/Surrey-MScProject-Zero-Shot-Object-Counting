@@ -174,3 +174,42 @@ def count_with_estimator(masks, scores, flagged, estimator, **ctx):
         total += m
         details.append({"mask_index": i, "region_area": area, "multiplicity": m})
     return total, details
+
+
+# ============================================================
+# Frozen GPV-K count (B3GK freeze, GPV_K_v1)
+# ============================================================
+
+def gpv_k_count(r4_masks, r4_scores, d1_peaks_xy, depth):
+    """
+    GPV-K = R4 + Gate 1 + K3 (frozen as GPV_K_v1).
+
+    1. Rule A flags: area > 4 x median kept area AND >= 2 D1 peaks.
+    2. A_ref = median area of non-flagged masks; regions by descending score;
+       qualifying regions have area >= 0.5 x A_ref.
+    3. Gate 1: sum of D1 peaks inside qualifying regions > number of
+       non-flagged masks (and at least one qualifying region).
+    4. Gate ON : count = non-flagged masks + sum over qualifying regions of
+                 max(1, K3 watershed segments >= 0.25 x A_ref).
+       Gate OFF: count = number of R4 masks.
+
+    Returns (count, gate_on).
+    """
+    from .gpv import points_per_mask, merged_mask_flags
+
+    masks = np.asarray(r4_masks, dtype=bool)
+    if masks.shape[0] == 0:
+        return 0, False
+    peaks = points_per_mask(masks, d1_peaks_xy)
+    flagged = merged_mask_flags(masks, peaks, "A")
+    a_ref = reference_area(masks, flagged)
+    n_nonflag = int((~flagged).sum())
+    regions = [r for _, r in build_regions(masks, r4_scores, flagged)
+               if r.sum() > 0 and r.sum() >= 0.5 * a_ref]
+    peaks_in = sum(k1_peaks(r, d1_peaks_xy) for r in regions)
+    if not (regions and peaks_in > n_nonflag):
+        return int(masks.shape[0]), False
+    min_seg = 0.25 * a_ref
+    total = n_nonflag + sum(max(1, k3_watershed_depth_gradient(r, depth, min_seg))
+                            for r in regions)
+    return int(total), True
