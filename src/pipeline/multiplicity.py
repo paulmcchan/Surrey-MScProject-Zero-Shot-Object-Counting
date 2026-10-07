@@ -213,3 +213,67 @@ def gpv_k_count(r4_masks, r4_scores, d1_peaks_xy, depth):
     total = n_nonflag + sum(max(1, k3_watershed_depth_gradient(r, depth, min_seg))
                             for r in regions)
     return int(total), True
+
+
+# ============================================================
+# SG with K replacing G2 (B3RK)
+# ============================================================
+
+def sg_k_count(b0_masks, a3c_mask, depth, sg_cfg, estimator):
+    """
+    SG_v1.1 with its G2 multiplicity replaced by a K estimator.
+
+    Unchanged from SG_v1.1: B0 anchor, C1 recovery, split candidates,
+    Stage-1 / Stage-2 gate (computed on SG_v1 G2 extras), refinable set.
+
+    For each refinable recovery component when Stage 2 is ON:
+        region = component pixels NOT covered by any B0 mask
+                 (same intent as the v1.1 double-counting fix)
+        m      = K segments in region (>= 1 if region non-empty, else 0)
+        extra  = max(m - 1, 0)          (the component's +1 is already in S)
+    A_ref (single-object size) = median B0 mask area; fallback = median
+    C1 component area if the image has no B0 masks. K2/K3 keep only
+    segments >= 0.25 x A_ref.
+
+    estimator: "K2" (shape watershed) or "K3" (depth-gradient watershed).
+    Returns dict with S_count, SG_count, stage2_on, extra_units, n_refinable.
+    """
+    from . import sg as sg_mod
+
+    summary, comps = sg_mod.compute_sg_image(b0_masks, a3c_mask, depth, sg_cfg)
+    s_count = summary["S_count"]
+    out = {"S_count": s_count, "stage2_on": summary["stage2_on"],
+           "n_refinable": summary["refinable_components"],
+           "G2_SG_count": summary["SG_count"]}
+    if not summary["stage2_on"]:
+        out.update({"SG_count": float(s_count), "extra_units": 0, "a_ref": np.nan})
+        return out
+
+    b0_masks = np.asarray(b0_masks, dtype=bool)
+    h, w = np.asarray(a3c_mask).shape
+    union = b0_masks.any(axis=0) if b0_masks.shape[0] else np.zeros((h, w), bool)
+    labels, areas, _, _ = sg_mod.c1_components(a3c_mask)
+    if b0_masks.shape[0]:
+        a_ref = float(np.median(b0_masks.reshape(b0_masks.shape[0], -1).sum(axis=1)))
+    else:
+        a_ref = float(np.median(areas)) if areas.size else 1.0
+    min_seg = 0.25 * a_ref
+
+    extra = 0
+    for c in comps:
+        if not c["refinable"]:
+            continue
+        region = (labels == c["component_id"]) & ~union
+        if not region.any():
+            continue
+        if estimator == "K3":
+            m = k3_watershed_depth_gradient(region, depth, min_seg)
+        elif estimator == "K2":
+            m = k2_watershed_shape(region, min_seg)
+        else:
+            raise ValueError(estimator)
+        extra += max(max(1, int(m)) - 1, 0)
+
+    out.update({"SG_count": float(s_count + sg_cfg.correction_weight * extra),
+                "extra_units": int(extra), "a_ref": a_ref})
+    return out
