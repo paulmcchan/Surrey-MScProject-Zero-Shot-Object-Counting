@@ -422,6 +422,22 @@ def build_r4(guided_masks, guided_scores, b0_masks, b0_scores, iou_threshold=0.5
     return pool[keep], scores[keep], source[keep]
 
 
+def extract_peaks(score_map, min_distance_frac, score_threshold):
+    """
+    B1 D notebook `extract_reference_points` (no normalisation inside):
+    peak_local_max with min_distance = max(1, round(frac x short side)),
+    threshold_abs = score_threshold, exclude_border=False. Returns (K, 2) [x, y].
+    """
+    from skimage.feature import peak_local_max
+
+    s = np.asarray(score_map, dtype=np.float32)
+    h, w = s.shape
+    md = max(1, int(round(min_distance_frac * min(h, w))))
+    yx = peak_local_max(s, min_distance=md, threshold_abs=score_threshold,
+                        exclude_border=False)
+    return yx[:, ::-1].astype(np.float64) if len(yx) else np.zeros((0, 2))
+
+
 def d1_peaks(target_score, min_distance_frac=0.020, score_threshold=0.30):
     """
     Frozen D1 reference points (B1 D notebook, Step 11D.8):

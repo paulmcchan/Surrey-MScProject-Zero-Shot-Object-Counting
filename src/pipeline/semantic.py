@@ -122,3 +122,67 @@ def a3c_mask(target_score, percentile=A3C_PERCENTILE):
     target_score = np.asarray(target_score, dtype=np.float32)
     threshold = float(np.percentile(target_score, percentile))
     return target_score >= threshold, threshold
+
+
+# ============================================================
+# D5 — CLIP Surgery target similarity map (B1 D notebook, 11H)
+# ============================================================
+#
+# repo   : xmed-lab/CLIP_Surgery @ d4696d47f49cfe70f49140afe5eb94f94c5f59bc
+# model  : CS-ViT-B/16
+# input  : Resize((768, 768), BICUBIC) -> ToTensor -> CLIP Normalize
+# text   : encode_text_with_prompt_ensemble([class_name]);
+#          redundant feature = encode_text_with_prompt_ensemble([""])
+# map    : clip_feature_surgery -> get_similarity_map(sim[:, 1:, :], (H, W))
+#          (already min-max normalised by CLIP Surgery; NOT renormalised)
+# peaks  : min_distance = round(0.020 x short side), threshold 0.50
+# ============================================================
+
+CLIP_SURGERY_COMMIT = "d4696d47f49cfe70f49140afe5eb94f94c5f59bc"
+D5_RESOLUTION = 768
+D5_MIN_DISTANCE_FRAC = 0.020
+D5_SCORE_THRESHOLD = 0.50
+CLIP_MEAN = (0.48145466, 0.4578275, 0.40821073)
+CLIP_STD = (0.26862954, 0.26130258, 0.27577711)
+
+
+def build_clip_surgery(repo_path, device="cuda"):
+    """Import CLIP Surgery's `clip` from repo_path and load CS-ViT-B/16."""
+    repo_path = str(repo_path)
+    if repo_path not in sys.path:
+        sys.path.insert(0, repo_path)
+    if "clip" in sys.modules:
+        del sys.modules["clip"]
+    import clip  # CLIP Surgery's version
+
+    model, _ = clip.load("CS-ViT-B/16", device=device)
+    model.eval()
+    return clip, model
+
+
+def run_clip_surgery(clip_module, model, image, class_name, device="cuda",
+                     resolution=D5_RESOLUTION):
+    """PIL RGB image -> (H, W) float32 similarity map at original resolution."""
+    import torch
+    from torchvision import transforms
+    from torchvision.transforms import InterpolationMode
+
+    image = image.convert("RGB")
+    width, height = image.size
+    preprocess = transforms.Compose([
+        transforms.Resize((resolution, resolution),
+                          interpolation=InterpolationMode.BICUBIC),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=CLIP_MEAN, std=CLIP_STD),
+    ])
+    x = preprocess(image).unsqueeze(0).to(device)
+    with torch.inference_mode():
+        feats = model.encode_image(x)
+        feats = feats / feats.norm(dim=-1, keepdim=True)
+        text = clip_module.encode_text_with_prompt_ensemble(model, [class_name], device)
+        redundant = clip_module.encode_text_with_prompt_ensemble(model, [""], device)
+        sim = clip_module.clip_feature_surgery(feats, text, redundant)
+        sim_map = clip_module.get_similarity_map(sim[:, 1:, :], (height, width))
+    out = sim_map[0, :, :, 0].detach().float().cpu().numpy().astype(np.float32)
+    assert out.shape == (height, width)
+    return out
