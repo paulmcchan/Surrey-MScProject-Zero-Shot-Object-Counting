@@ -307,3 +307,29 @@ def save_san_scores(path, image_id, class_name, target_score,
         },
         path,
     )
+
+
+# ============================================================
+# End-to-End checkpoint guided masks (B1 checkpoint cache)
+# ============================================================
+
+CHECKPOINT_GUIDED_CACHE = (
+    RESULTS_ROOT / "B1_experiments" / "End_to_End_Checkpoint" / "guided_mask_cache"
+)
+
+
+def guided_cache_path(system, dataset_index, image_id, root=None):
+    root = CHECKPOINT_GUIDED_CACHE if root is None else Path(root)
+    return root / system / f"{int(dataset_index):04d}_{image_stem(image_id)}.npz"
+
+
+def load_guided_masks(path):
+    """Checkpoint guided masks: packed little-endian, one mask per prompt."""
+    with np.load(path, allow_pickle=False) as d:
+        h, w = int(d["height"]), int(d["width"])
+        return {
+            "masks": unpack_masks(d["packed_masks"], h, w, bitorder="little"),
+            "prompts_xy": np.asarray(d["prompt_points_xy"], dtype=np.float64).reshape(-1, 2),
+            "scores": np.asarray(d["sam2_scores"], dtype=np.float64),
+            "areas": np.asarray(d["mask_area_px"], dtype=np.int64),
+        }

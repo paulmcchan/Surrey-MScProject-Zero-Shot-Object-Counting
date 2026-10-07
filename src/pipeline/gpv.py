@@ -402,3 +402,81 @@ def resolve_groups(base_masks, base_scores, candidate_idx, new_masks, new_scores
             kept += 1
     return {"count": count, "replaced_groups": replaced,
             "kept_groups": kept, "added_units": added}
+
+
+# ============================================================
+# Shared builders (reused by B3GK)
+# ============================================================
+
+def build_r4(guided_masks, guided_scores, b0_masks, b0_scores, iou_threshold=0.5):
+    """
+    R4 (B3G Section 4): guided D1-kept masks U B0 AMG masks,
+    IoU-NMS by predicted IoU. Returns (kept_masks, kept_scores, kept_source).
+    """
+    pool, scores, source = pool_masks([guided_masks, b0_masks],
+                                      [guided_scores, b0_scores],
+                                      ["guided", "b0"])
+    if pool.shape[0] == 0 or pool.shape[1:] == (1, 1):
+        return pool[:0], scores[:0], source[:0]
+    keep = nms_masks(pool, scores, iou_threshold)
+    return pool[keep], scores[keep], source[keep]
+
+
+def d1_peaks(target_score, min_distance_frac=0.020, score_threshold=0.30):
+    """
+    Frozen D1 reference points (B1 D notebook, Step 11D.8):
+    per-image min-max normalised SAN target score; peak_local_max with
+    min_distance = round(0.020 x short side) px, threshold_abs = 0.30,
+    exclude_border=False. Returns (K, 2) float [x, y].
+    """
+    from skimage.feature import peak_local_max
+
+    s = np.asarray(target_score, dtype=np.float32)
+    lo, hi = float(s.min()), float(s.max())
+    norm = np.zeros_like(s) if hi - lo < 1e-12 else (s - lo) / (hi - lo)
+    h, w = norm.shape
+    md = max(1, int(round(min_distance_frac * min(h, w))))
+    yx = peak_local_max(norm, min_distance=md, threshold_abs=score_threshold,
+                        exclude_border=False)
+    return yx[:, ::-1].astype(np.float64) if len(yx) else np.zeros((0, 2))
+
+
+def points_per_mask(masks, points_xy):
+    """Number of points inside each mask (np.rint + clip rule)."""
+    masks = np.asarray(masks, dtype=bool)
+    pts = np.asarray(points_xy, dtype=np.float64).reshape(-1, 2)
+    if masks.shape[0] == 0 or pts.shape[0] == 0:
+        return np.zeros(masks.shape[0], dtype=np.int64)
+    h, w = masks.shape[1:]
+    px = np.clip(np.rint(pts[:, 0]).astype(np.int64), 0, w - 1)
+    py = np.clip(np.rint(pts[:, 1]).astype(np.int64), 0, h - 1)
+    return masks[:, py, px].sum(axis=1)
+
+
+def merged_mask_flags(masks, peaks_per_mask, rule, factor=4.0, min_single_ref=3):
+    """
+    GT-free merged-mask rules (B3GK Step 3):
+        A : area > factor x median(all kept areas)        AND peaks >= 2
+        B : peaks >= 2
+        C : peaks >= 3
+        D : area > factor x median(areas of 1-peak masks) AND peaks >= 2
+            (falls back to the all-mask median if fewer than
+             min_single_ref one-peak masks exist)
+    """
+    masks = np.asarray(masks, dtype=bool)
+    n = masks.shape[0]
+    if n == 0:
+        return np.zeros(0, dtype=bool)
+    peaks = np.asarray(peaks_per_mask)
+    areas = masks.reshape(n, -1).sum(axis=1).astype(np.float64)
+    if rule == "B":
+        return peaks >= 2
+    if rule == "C":
+        return peaks >= 3
+    if rule == "A":
+        return (areas > factor * np.median(areas)) & (peaks >= 2)
+    if rule == "D":
+        single = areas[peaks == 1]
+        ref = np.median(single) if single.size >= min_single_ref else np.median(areas)
+        return (areas > factor * ref) & (peaks >= 2)
+    raise ValueError(rule)
