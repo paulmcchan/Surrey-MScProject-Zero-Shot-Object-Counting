@@ -272,16 +272,19 @@ def g2_split_component(comp_mask_crop, depth_crop, offset_yx, cfg):
 # Full SG count for one image
 # ============================================================
 
-def compute_sg_image(b0_masks, a3c_mask, depth, cfg):
+def compute_sg_image(b0_masks, a3c_mask, depth, cfg, recovery_region=None):
     """
     Compute S and SG (variant per cfg.variant) for one image.
 
     Parameters
     ----------
-    b0_masks : (N, H, W) bool   frozen B0 AMG masks
+    b0_masks : (N, H, W) bool   anchor masks (frozen B0 AMG masks for SG;
+                                 GPV-derived anchor for the B3H hybrids)
     a3c_mask : (H, W) bool      A3c semantic mask
     depth    : (H, W) float32   Marigold relative depth
     cfg      : SGConfig
+    recovery_region : optional (H, W) bool; if given, a component is
+                      recovered only if its centroid also lies in it
 
     Returns
     -------
@@ -303,6 +306,10 @@ def compute_sg_image(b0_masks, a3c_mask, depth, cfg):
 
     covered = points_covered(centroids, union)
     recovery = ~covered
+    if recovery_region is not None:
+        # B3H H1b: recovery restricted to components whose centroid lies
+        # inside the given region (default None = SG_v1 / v1.1 behaviour)
+        recovery &= points_covered(centroids, np.asarray(recovery_region, dtype=bool))
 
     # ---- Split candidates + Stage-1 feature ---------------
     candidate, area_pct = split_candidates(areas, cfg.candidate_quantile)
