@@ -333,3 +333,33 @@ def load_guided_masks(path):
             "scores": np.asarray(d["sam2_scores"], dtype=np.float64),
             "areas": np.asarray(d["mask_area_px"], dtype=np.int64),
         }
+
+
+def save_guided_masks(path, masks, prompts_xy, scores, image_hw,
+                      system="dense_recovery", dataset_index=None, image_id=None):
+    """Write guided masks in the End-to-End checkpoint cache format.
+    image_hw = (H, W) — required so images with zero prompts keep their size."""
+    masks = np.asarray(masks, dtype=bool)
+    n = masks.shape[0]
+    h, w = int(image_hw[0]), int(image_hw[1])
+    assert n == 0 or masks.shape[1:] == (h, w)
+    pts = np.asarray(prompts_xy, dtype=np.float32).reshape(-1, 2)
+    if n:
+        px = np.clip(np.rint(pts[:, 0]).astype(int), 0, w - 1)
+        py = np.clip(np.rint(pts[:, 1]).astype(int), 0, h - 1)
+        inside = masks[np.arange(n), py, px]
+    else:
+        inside = np.zeros(0, dtype=bool)
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(
+        path,
+        checkpoint_id=np.array(system),
+        dataset_index=np.int64(-1 if dataset_index is None else dataset_index),
+        image_id=np.array("" if image_id is None else str(image_id)),
+        packed_masks=pack_masks(masks.reshape(n, h, w), "little"),
+        prompt_points_xy=pts,
+        sam2_scores=np.asarray(scores, dtype=np.float32).reshape(-1),
+        mask_area_px=masks.reshape(n, -1).sum(axis=1).astype(np.int64) if n else np.zeros(0, np.int64),
+        prompt_inside_mask=inside,
+        height=np.int64(h), width=np.int64(w),
+    )

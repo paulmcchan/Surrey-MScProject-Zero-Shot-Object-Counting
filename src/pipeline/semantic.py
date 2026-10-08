@@ -186,3 +186,44 @@ def run_clip_surgery(clip_module, model, image, class_name, device="cuda",
     out = sim_map[0, :, :, 0].detach().float().cpu().numpy().astype(np.float32)
     assert out.shape == (height, width)
     return out
+
+
+# ============================================================
+# D6 — SAN intermediate query outputs (B1 D notebook, extract_d6_candidates)
+# ============================================================
+
+def run_san_d6(model, image, class_name, device="cuda", short_side=SAN_SHORT_SIDE):
+    """
+    One SAN forward reproducing SAN.forward() preprocessing, returning the
+    D6 intermediates exactly as cached in the B1 D notebook:
+
+        mask_preds        : (1, Q, h, w) float32  pre-sigmoid query mask logits
+        target_query_prob : (1, Q)       float32  P(target | q)
+                            softmax over [class_name, "background", no-object],
+                            no-object column dropped, column 0 taken
+    """
+    import torch
+    import torch.nn.functional as F
+    from detectron2.structures import ImageList
+
+    tensor, height, width = prepare_san_input(image, short_side)
+    vocabulary = [class_name, "background"]
+    with torch.no_grad():
+        ov_w = (model.ov_classifier.logit_scale.exp()
+                * model.ov_classifier.get_classifier_by_vocabulary(vocabulary))
+        images = [(tensor.to(model.device) - model.pixel_mean) / model.pixel_std]
+        images = ImageList.from_tensors(images, model.size_divisibility)
+        clip_input = images.tensor
+        if model.asymetric_input:
+            clip_input = F.interpolate(clip_input, scale_factor=model.clip_resolution,
+                                       mode="bilinear")
+        clip_feats = model.clip_visual_extractor(clip_input)
+        side_feats = model.side_adapter_network.forward_features(images.tensor, clip_feats)
+        mask_preds_list, attn_biases_list = model.side_adapter_network.decode_masks(side_feats)
+        mask_pred = mask_preds_list[-1]
+        attn_bias = attn_biases_list[-1]
+        mask_emb = model.clip_rec_head(clip_feats, attn_bias, normalize=True)
+        mask_logits = torch.einsum("bqc,nc->bqn", mask_emb, ov_w)
+        mask_cls = F.softmax(mask_logits, dim=-1)[..., :-1]
+        target_query_prob = mask_cls[:, :, 0]
+    return (mask_pred.detach().cpu().float(), target_query_prob.detach().cpu().float())
