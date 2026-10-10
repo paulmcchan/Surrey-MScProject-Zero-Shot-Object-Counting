@@ -227,3 +227,46 @@ def run_san_d6(model, image, class_name, device="cuda", short_side=SAN_SHORT_SID
         mask_cls = F.softmax(mask_logits, dim=-1)[..., :-1]
         target_query_prob = mask_cls[:, :, 0]
     return (mask_pred.detach().cpu().float(), target_query_prob.detach().cpu().float())
+
+
+# ============================================================
+# Expanded vocabulary (B3S Step 3)
+# ============================================================
+
+# Pre-declared background "stuff" vocabulary: COCO-Stuff stuff classes that
+# describe surfaces and scene layout (SAN was trained on COCO-Stuff), with
+# object-like stuff classes (fruit, vegetable, flower, food, leaves, stone,
+# paper, cloth, ...) excluded because they could describe countable targets.
+STUFF_BACKGROUND_VOCAB = [
+    "sky", "clouds", "wall", "floor", "ceiling", "ground", "road", "pavement",
+    "grass", "sand", "dirt", "gravel", "snow", "water", "sea", "river",
+    "mountain", "hill", "fog", "building", "house", "roof", "table", "desk",
+    "counter", "shelf", "cabinet", "cupboard", "door", "window", "curtain",
+    "carpet", "rug", "mat", "tent", "fence", "railing", "platform",
+    "playing field", "stairs", "bridge", "mud", "skyscraper",
+]
+
+
+def expanded_vocabulary(class_name, stuff=STUFF_BACKGROUND_VOCAB):
+    """
+    [class_name, "background", stuff...] with any stuff term removed if it
+    overlaps the class name as a substring either way (e.g. target "windows"
+    drops "window"). Target stays at index 0, "background" at index 1.
+    """
+    cn = class_name.lower()
+    kept = [s for s in stuff if s not in cn and cn.rstrip("s") not in s]
+    return [class_name, "background"] + kept
+
+
+def run_san_vocab(model, image, vocabulary, device="cuda", short_side=SAN_SHORT_SIDE):
+    """SAN forward with an arbitrary vocabulary -> (C, H, W) float32 score maps."""
+    import torch
+
+    tensor, height, width = prepare_san_input(image, short_side)
+    inputs = [{"image": tensor.to(device), "height": height, "width": width,
+               "vocabulary": list(vocabulary)}]
+    with torch.no_grad():
+        outputs = model(inputs)
+    sem_seg = outputs[0]["sem_seg"].detach().cpu().float().numpy().astype(np.float32)
+    assert sem_seg.shape[0] == len(vocabulary), (sem_seg.shape, len(vocabulary))
+    return sem_seg
