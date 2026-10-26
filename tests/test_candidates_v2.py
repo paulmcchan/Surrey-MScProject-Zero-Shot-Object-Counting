@@ -15,7 +15,7 @@ import src.pipeline.candidates_v2 as core
 import src.pipeline.candidates as C
 import src.pipeline.gpv as gpv
 import src.pipeline.b0 as b0
-from src.counting import pipeline_a, pipeline_b
+from src.counting import counting_gpv_r4_p_mixa, counting_gpv_kn_p_lm0
 
 # ---------------- fake SAM2 (deterministic in the masked input) ----------------
 def fake_run_amg(amg, image):
@@ -128,8 +128,8 @@ def test_standalone_equals_joint(n=20):
         core.normals_edge = lambda M_, pil, edge=edge: edge
         pil = Image.fromarray(img)
         joint = core.count_image(M, pil, classes, "multi", systems=("A", "B"))["counts"]
-        assert pipeline_a.count_image(M, pil, classes, "multi")["counts"] == joint["A"]
-        assert pipeline_b.count_image(M, pil, classes, "multi")["counts"] == joint["B"]
+        assert counting_gpv_r4_p_mixa.count_image(M, pil, classes, "multi")["counts"] == joint["A"]
+        assert counting_gpv_kn_p_lm0.count_image(M, pil, classes, "multi")["counts"] == joint["B"]
 
 def test_run_batch_resumable():
     rng = np.random.default_rng(4); M = fake_models()
