@@ -5,6 +5,8 @@ Dataset loaders for the MSc Zero-Shot Object Counting project.
 Provides:
 - FSC147Dataset
 - OmniCount191Dataset
+- CARPKDataset (B6)
+- VOC2007CountingDataset (B6)
 - collate_keep_dicts
 """
 # ============================================================
@@ -631,3 +633,178 @@ def collate_keep_dicts(batch: List[dict]) -> List[dict]:
     pipeline stage requires it.
     """
     return batch
+
+# ============================================================
+# CARPK Dataset Loader (B6)
+# ============================================================
+
+class CARPKDataset(Dataset):
+    """
+    CARPK (Hsieh et al., ICCV 2017) in COCO format.
+
+    Expected structure (as in the verified Kaggle conversion 'carpk_coco'):
+
+        root/ (anywhere below)
+        ├── test/                     459 images (1280 x 720)
+        ├── train/                    989 images
+        ├── test_annotations.json     COCO: images, annotations (bbox x,y,w,h), categories [car]
+        └── train_annotations.json
+
+    Ground truth: one box per car; count = number of boxes (as given, no de-duplication).
+    """
+
+    CLASS_NAME = "car"
+
+    def __init__(self, root, split="test", load_images=True):
+        if split not in ("train", "test"):
+            raise ValueError(f"Invalid split '{split}'. Use 'train' or 'test'.")
+        self.root = Path(root)
+        self.split = split
+        self.load_images = load_images
+        found = sorted(self.root.rglob(f"{split}_annotations.json"))
+        if not found:
+            raise FileNotFoundError(f"{split}_annotations.json not found under {self.root}")
+        self.annotation_file = found[0]
+        self.image_dir = self.annotation_file.parent / split
+        if not self.image_dir.is_dir():
+            raise FileNotFoundError(f"Image folder not found: {self.image_dir}")
+        coco = json.loads(self.annotation_file.read_text())
+        self.images = sorted(coco["images"], key=lambda im: im["file_name"])
+        self.boxes_by_image = defaultdict(list)
+        for a in coco["annotations"]:
+            self.boxes_by_image[a["image_id"]].append(a["bbox"])
+
+    def __len__(self):
+        return len(self.images)
+
+    def __getitem__(self, idx):
+        im = self.images[idx]
+        width, height = int(im["width"]), int(im["height"])
+        image_path = self.image_dir / im["file_name"]
+        boxes = []
+        for x, y, w, h in self.boxes_by_image.get(im["id"], []):
+            x1 = max(0.0, min(float(x), width)); y1 = max(0.0, min(float(y), height))
+            x2 = max(0.0, min(float(x + w), width)); y2 = max(0.0, min(float(y + h), height))
+            boxes.append([x1, y1, x2, y2])
+        points = [[(b[0] + b[2]) / 2.0, (b[1] + b[3]) / 2.0] for b in boxes]
+        image = None
+        if self.load_images:
+            image = Image.open(image_path).convert("RGB")
+            width, height = image.size
+        return {
+            "image_id": f"CARPK/{self.split}/{im['file_name']}",
+            "image_path": str(image_path),
+            "image": image,
+            "width": width, "height": height,
+            "categories": {self.CLASS_NAME: {"points": points, "boxes": boxes, "count": len(boxes)}},
+            "exemplar_boxes": [],
+            "dataset": "carpk",
+            "domain": None,
+            "split": self.split,
+        }
+
+
+# ============================================================
+# PASCAL VOC 2007 Counting Dataset Loader (B6)
+# ============================================================
+
+VOC_CLASSES = ["aeroplane", "bicycle", "bird", "boat", "bottle", "bus", "car", "cat", "chair", "cow",
+               "diningtable", "dog", "horse", "motorbike", "person", "pottedplant", "sheep", "sofa",
+               "train", "tvmonitor"]
+
+VOC_PROMPT_NAMES = {
+    "aeroplane": "aeroplane", "diningtable": "dining table", "motorbike": "motorbike",
+    "pottedplant": "potted plant", "tvmonitor": "tv monitor",
+}
+
+
+def voc_prompt_name(class_name):
+    """Natural-language text prompt for a VOC class label."""
+    return VOC_PROMPT_NAMES.get(class_name, class_name)
+
+
+class VOC2007CountingDataset(Dataset):
+    """
+    PASCAL VOC 2007 for multi-label counting (count-test = the official 4,952-image test set).
+
+    Expected structure (from VOCtest_06-Nov-2007.tar):
+
+        root/ (anywhere below)
+        └── VOCdevkit/VOC2007/
+            ├── Annotations/*.xml
+            ├── ImageSets/Main/test.txt
+            └── JPEGImages/*.jpg
+
+    Ground truth per class: instance boxes from the XML annotations.
+    include_difficult decides whether objects flagged 'difficult' are counted (the B6 rule
+    file fixes the convention); both counts are always provided:
+        categories[c]["count"]               — under the chosen convention
+        categories[c]["count_all"]           — all objects
+        categories[c]["count_nondifficult"]  — difficult objects excluded
+    Every image is queried for all 20 classes ("domain_vocabulary").
+    """
+
+    def __init__(self, root, split="test", include_difficult=True, load_images=True):
+        self.root = Path(root)
+        self.split = split
+        self.include_difficult = bool(include_difficult)
+        self.load_images = load_images
+        found = sorted(self.root.rglob("VOC2007/ImageSets/Main"))
+        if not found:
+            raise FileNotFoundError(f"VOCdevkit/VOC2007 not found under {self.root}")
+        self.voc_dir = found[0].parent.parent                 # .../VOC2007
+        id_file = self.voc_dir / "ImageSets" / "Main" / f"{split}.txt"
+        self.image_ids = id_file.read_text().split()
+
+    def __len__(self):
+        return len(self.image_ids)
+
+    def parse(self, image_id):
+        import xml.etree.ElementTree as ET
+        root = ET.parse(self.voc_dir / "Annotations" / f"{image_id}.xml").getroot()
+        size = root.find("size")
+        width, height = int(size.findtext("width")), int(size.findtext("height"))
+        objs = []
+        for o in root.findall("object"):
+            bb = o.find("bndbox")
+            # VOC boxes are 1-based inclusive pixel coordinates -> 0-based [x1, y1, x2, y2]
+            box = [float(bb.findtext("xmin")) - 1, float(bb.findtext("ymin")) - 1,
+                   float(bb.findtext("xmax")), float(bb.findtext("ymax"))]
+            objs.append({"name": o.findtext("name").strip(), "difficult": int(o.findtext("difficult", "0") or 0),
+                         "box": box})
+        return width, height, objs
+
+    def __getitem__(self, idx):
+        image_id = self.image_ids[idx]
+        width, height, objs = self.parse(image_id)
+        categories = {}
+        for c in VOC_CLASSES:
+            mine = [o for o in objs if o["name"] == c]
+            if not mine:
+                continue
+            kept = [o for o in mine if self.include_difficult or not o["difficult"]]
+            boxes = [o["box"] for o in kept]
+            n_nd = sum(1 for o in mine if not o["difficult"])
+            if not boxes and n_nd == 0 and not self.include_difficult:
+                continue                                          # only difficult objects -> absent
+            categories[c] = {"points": [[(b[0] + b[2]) / 2.0, (b[1] + b[3]) / 2.0] for b in boxes],
+                             "boxes": boxes, "count": len(boxes),
+                             "count_all": len(mine), "count_nondifficult": n_nd}
+        image_path = self.voc_dir / "JPEGImages" / f"{image_id}.jpg"
+        image = None
+        if self.load_images:
+            image = Image.open(image_path).convert("RGB")
+            width, height = image.size
+        return {
+            "image_id": f"VOC2007/{self.split}/{image_id}",
+            "image_path": str(image_path),
+            "image": image,
+            "width": width, "height": height,
+            "categories": categories,
+            "exemplar_boxes": [],
+            "dataset": "voc2007",
+            "domain": None,
+            "domain_vocabulary": list(VOC_CLASSES),
+            "prompt_names": {c: voc_prompt_name(c) for c in VOC_CLASSES},
+            "split": self.split,
+        }
