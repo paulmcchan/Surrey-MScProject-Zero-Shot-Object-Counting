@@ -61,4 +61,12 @@ Final pipelines: `src/counting/counting_gpv_r4_p_mixa.py` (GPV_R4+P[MixA], prima
 
 ## `07_b6_test_evaluation/` — B6 — test evaluation (FSC-147, CARPK, OmniCount-191, PASCAL VOC 2007)
 
-- (to be added)
+- `B6_0_Setup_and_Rules.ipynb` — B6.0: data checks, fixed baseline subsets, class groups, pre-declared rule file (CPU).
+- `B6_1_Ours_Single.ipynb` — B6.1: our two pipelines (v1.1) and B0 on FSC-147 and CARPK test.
+- `B6_2_Ours_Multi.ipynb` — B6.2: our two pipelines (U_both) on OmniCount-191 and VOC 2007 test.
+- `B6_3_Baselines_SAM_TFOC.ipynb` — B6.3: vanilla SAM and TFOC (text) re-runs; TFOC reproduction gate passed.
+- `B6_4_Baseline_OmniCount_valchecks.ipynb` — B6.4: OmniCount port set-up, sanity check and Marigold speed check on FSC-147 val (superseded).
+- `B6_4_Baseline_OmniCount_A.ipynb`, `_B.ipynb` — B6.4: OmniCount re-run (declared configuration), two parallel sessions; gate overridden after review.
+- `B6_4_Step_2_2_diagnostic.ipynb` — B6.4: CPU diagnostic of the FSC-147 reproduction gap.
+- `B6_4v_OmniCount_FSC_grid64_A.ipynb`, `_B.ipynb` — B6.4: pre-declared single variant (SAM grid 64) on FSC-147; failed the gate.
+- `B6_5_Evaluation.ipynb` — B6.5: all pre-declared analyses and exploratory checks (CPU).
