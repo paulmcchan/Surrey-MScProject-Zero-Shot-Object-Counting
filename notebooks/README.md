@@ -70,3 +70,4 @@ Final pipelines: `src/counting/counting_gpv_r4_p_mixa.py` (GPV_R4+P[MixA], prima
 - `B6_4_Step_2_2_diagnostic.ipynb` — B6.4: CPU diagnostic of the FSC-147 reproduction gap.
 - `B6_4v_OmniCount_FSC_grid64_A.ipynb`, `_B.ipynb` — B6.4: pre-declared single variant (SAM grid 64) on FSC-147; failed the gate.
 - `B6_5_Evaluation.ipynb` — B6.5: all pre-declared analyses and exploratory checks (CPU).
+- `B6_4w_OmniCount_UpdatedCode_ValCheck.ipynb` — B6.4w: check of the authors' updated code (commit a0f550a, Nov 2026) on 10 FSC-147 val images — single-text CLIP-Surgery yields all-NaN maps (every image falls back to plain SAM); `run_pipeline.py` counts are capped at 16 per class; 50-step depth timed (×2.6).
